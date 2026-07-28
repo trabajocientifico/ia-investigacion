@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IA para la Investigación Científica · Taller · Trabajo Científico</title>
+<style>
+  * { box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:#070B12; overflow:hidden;
+    font-family:"Inter","Helvetica Neue",Arial,sans-serif; -webkit-font-smoothing:antialiased; }
+  #stage{ position:fixed; inset:0; display:grid; place-items:center; background:#070B12; }
+  canvas{ display:block; aspect-ratio:16/9; width:min(100vw, calc(100vh * 16 / 9)); height:auto; }
+  #nav{ position:fixed; right:16px; bottom:14px; display:flex; gap:7px; align-items:center;
+        transition:opacity .4s; z-index:5; }
+  #nav.idle{ opacity:0; }
+  button{ font:500 11px/1 "Inter",Arial,sans-serif; letter-spacing:.09em; text-transform:uppercase;
+    color:#8792A2; background:rgba(255,255,255,.05); border:1px solid rgba(120,160,200,.18);
+    border-radius:999px; padding:8px 13px; cursor:pointer;
+    transition:background .15s, color .15s, transform .12s; }
+  button:hover{ color:#E6EDF3; background:rgba(34,211,238,.12); border-color:rgba(34,211,238,.4); }
+  button:active{ transform:scale(.96); }
+  button:focus-visible{ outline:2px solid #22D3EE; outline-offset:2px; }
+  body.hidecursor{ cursor:none; }
+  #help{ position:fixed; inset:0; display:none; place-items:center;
+    background:rgba(3,6,12,.6); z-index:9; }
+  #help.on{ display:grid; }
+  #helpcard{ background:#0E1420; border:1px solid rgba(120,160,200,.18); border-radius:20px;
+    padding:30px 40px 26px; min-width:400px;
+    box-shadow:0 30px 80px rgba(0,0,0,.55); font:15px/1 "Inter",Arial,sans-serif; color:#E6EDF3; }
+  #helpcard h3{ margin:0 0 20px; font:600 13px "Inter",Arial,sans-serif;
+    letter-spacing:.14em; text-transform:uppercase; color:#22D3EE; }
+  #helpcard .row{ display:flex; align-items:center; gap:7px; margin:11px 0; }
+  #helpcard .row span{ margin-left:auto; color:#8792A2; padding-left:34px; }
+  kbd{ font:600 12px ui-monospace,Menlo,monospace; background:rgba(255,255,255,.05);
+    border:1px solid rgba(120,160,200,.22); border-bottom-width:2.5px; border-radius:6px;
+    padding:5px 9px; color:#E6EDF3; min-width:16px; text-align:center; display:inline-block; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+<div id="nav">
+  <button id="prev">←</button><button id="next">→</button>
+  <button id="replay">R · repetir</button><button id="fs">F · pantalla completa</button>
+  <button id="hbtn">H · ayuda</button>
+</div>
+<div id="help"><div id="helpcard">
+  <h3>Atajos de teclado</h3>
+  <div class="row"><kbd>→</kbd><kbd>Espacio</kbd><kbd>Enter</kbd><span>Avanzar lámina</span></div>
+  <div class="row"><kbd>←</kbd><kbd>Retroceso</kbd><span>Lámina anterior</span></div>
+  <div class="row"><kbd>R</kbd><span>Repetir la animación</span></div>
+  <div class="row"><kbd>F</kbd><span>Pantalla completa</span></div>
+  <div class="row"><kbd>1</kbd>…<kbd>9</kbd><span>Ir a una lámina</span></div>
+  <div class="row"><kbd>Inicio</kbd><kbd>Fin</kbd><span>Portada · cierre</span></div>
+  <div class="row"><kbd>H</kbd><span>Mostrar / ocultar esta ayuda</span></div>
+</div></div>
+
+<script>
+(() => {
+const W = 1920, H = 1080;
+const cv = document.getElementById('c');
+cv.width = W; cv.height = H;
+let ctx = cv.getContext('2d');
+const oc = document.createElement('canvas');
+oc.width = W; oc.height = H;
+const octx = oc.getContext('2d');
+
+/* ── identidad ───────────────────────────────────────────── */
+const BG='#070B12', INK='#E6EDF3', MUT='#8792A2', LINE='#5B7A99';
+const CY='#22D3EE', BL='#3B82F6', VI='#A78BFA', GR='#34D399', AM='#FBBF24';
+const C1=GR, C2=CY, C3=AM, C4=VI;
+
+const rgb  = h => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+const rgba = (h,a) => { const C=rgb(h); return `rgba(${C[0]},${C[1]},${C[2]},${a})`; };
+const mix  = (a,b,t) => { const A=rgb(a),B=rgb(b);
+  return `rgb(${Math.round(A[0]+(B[0]-A[0])*t)},${Math.round(A[1]+(B[1]-A[1])*t)},${Math.round(A[2]+(B[2]-A[2])*t)})`; };
+
+const clamp = (v,a=0,b=1)=> v<a?a:v>b?b:v;
+const seg   = (t,a,b)=> clamp((t-a)/(b-a));
+const lerp  = (a,b,t)=> a+(b-a)*t;
+const eOut  = x => 1-Math.pow(1-x,3);
+const eIO   = x => x<.5 ? 4*x*x*x : 1-Math.pow(-2*x+2,3)/2;
+const eBack = x => { const c1=1.8,c3=c1+1; return 1+c3*Math.pow(x-1,3)+c1*Math.pow(x-1,2); };
+let _s = 20260728;
+const rnd = () => { _s=(_s*1664525+1013904223)%4294967296; return _s/4294967296; };
+const gauss = () => (rnd()+rnd()+rnd()+rnd()-2)/1.2;
+
+/* ── primitivas ──────────────────────────────────────────── */
+function rr(x,y,w,h,r){ ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function glowOn(c,b){ ctx.shadowColor=c; ctx.shadowBlur=b; }
+function glowOff(){ ctx.shadowBlur=0; ctx.shadowColor='transparent'; }
+
+function tracked(text,x,y,size,sp,color,weight=500,align='left'){
+  ctx.save();
+  ctx.font = `${weight} ${size}px "Inter","Helvetica Neue",Arial,sans-serif`;
+  ctx.textBaseline='middle';
+  let w=-sp; for(const ch of text) w+=ctx.measureText(ch).width+sp;
+  let cx = align==='center' ? x-w/2 : align==='right' ? x-w : x;
+  ctx.fillStyle=color;
+  for(const ch of text){ ctx.fillText(ch,cx,y); cx+=ctx.measureText(ch).width+sp; }
+  ctx.restore(); return w;
+}
+function txt(s,x,y,font,color,align='left',baseline='middle'){
+  ctx.font=font; ctx.fillStyle=color; ctx.textAlign=align; ctx.textBaseline=baseline;
+  ctx.fillText(s,x,y); ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+}
+function dot(x,y,r,color,a=1){ ctx.globalAlpha=a; ctx.fillStyle=color;
+  ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill(); ctx.globalAlpha=1; }
+function panel(x,y,w,h,a){
+  ctx.save(); ctx.globalAlpha*=a;
+  ctx.fillStyle='rgba(255,255,255,0.025)'; rr(x,y,w,h,18); ctx.fill();
+  glowOn(rgba(CY,.25),18);
+  ctx.strokeStyle=rgba(CY,.20); ctx.lineWidth=1.4; rr(x,y,w,h,18); ctx.stroke();
+  glowOff();
+  ctx.restore();
+}
+
+/* ── datos deterministas ─────────────────────────────────── */
+const REG = [];
+for(let i=0;i<26;i++){ const x=0.06+i*0.035; REG.push({x, y:0.18+x*0.60+gauss()*0.07}); }
+const NET=[]; for(let i=0;i<50;i++)
+  NET.push({x:rnd(), y:rnd(), vx:(rnd()-.5)*0.016, vy:(rnd()-.5)*0.016});
+const SCLU=[[0.24,0.30],[0.76,0.32],[0.5,0.76]];
+const SEARCH=(()=>{ const pts=[];
+  SCLU.forEach((c,ci)=>{ for(let i=0;i<7;i++) pts.push({x:c[0]+gauss()*0.085,y:c[1]+gauss()*0.085,ci}); });
+  return pts; })();
+const QC={x:0.5,y:0.5};
+
+/* ── contenido (mínimo, sin metáforas) ───────────────────── */
+const STAGES = [
+  { n:'01', short:'Formular', name:'Formulación del proyecto', color:C1,
+    leftLabel:'COMPONENTES', vizLabel:'ESTRUCTURA',
+    tags:['Problema','Justificación','Objetivos','Hipótesis','Metodología','Cronograma','Presupuesto'] },
+  { n:'02', short:'Buscar', name:'Búsqueda especializada', color:C2,
+    leftLabel:'FUENTES', vizLabel:'FLUJO DE TRABAJO',
+    tags:['Scopus','Web of Science','Ecuaciones','Cribado','Bibliometría','VOSviewer'] },
+  { n:'03', short:'Analizar', name:'Análisis de datos', color:C3,
+    leftLabel:'MÉTODOS', vizLabel:'FLUJO DE TRABAJO',
+    tags:['Estadística','Supuestos','Modelos · ML','Cualitativo','Categorías','Visualización'] },
+  { n:'04', short:'Publicar', name:'Redacción y publicación', color:C4,
+    leftLabel:'SALIDA', vizLabel:'FLUJO DE TRABAJO',
+    tags:['Revista objetivo','Cuartil','IMRyD','Abstract','Revisores','Lenguaje'] },
+];
+
+const TOOLS = [
+  {s:0,n:'ChatGPT',t:'LLM'},{s:0,n:'Claude',t:'LLM'},{s:0,n:'Gemini',t:'LLM'},
+  {s:0,n:'NotebookLM',t:'RAG'},{s:0,n:'Perplexity',t:'BÚSQUEDA'},
+
+  {s:1,n:'Elicit',t:'EXTRACCIÓN'},{s:1,n:'Consensus',t:'EVIDENCIA'},{s:1,n:'SciSpace',t:'LECTURA'},
+  {s:1,n:'Semantic Scholar',t:'SEMÁNTICA'},{s:1,n:'Connected Papers',t:'GRAFO'},
+  {s:1,n:'Research Rabbit',t:'GRAFO'},{s:1,n:'Litmaps',t:'ALERTAS'},
+  {s:1,n:'Tree of Science',t:'BIBLIOMETRÍA'},{s:1,n:'Bibliometrix',t:'R'},{s:1,n:'VOSviewer',t:'REDES'},
+
+  {s:2,n:'Julius AI',t:'ESTADÍSTICA'},{s:2,n:'ChatGPT · Datos',t:'CÓDIGO'},{s:2,n:'Claude Code',t:'PIPELINES'},
+  {s:2,n:'GitHub Copilot',t:'CÓDIGO'},{s:2,n:'ATLAS.ti IA',t:'CUALITATIVO'},
+  {s:2,n:'MAXQDA AI',t:'CUALITATIVO'},{s:2,n:'NVivo',t:'CUALITATIVO'},{s:2,n:'Flourish',t:'VIZ'},
+
+  {s:3,n:'Paperpal',t:'EDICIÓN'},{s:3,n:'Writefull',t:'LENGUAJE'},{s:3,n:'Trinka',t:'GRAMÁTICA'},
+  {s:3,n:'Jenni AI',t:'ESCRITURA'},{s:3,n:'Journal Finder',t:'REVISTA'},
+  {s:3,n:'Manuscript Matcher',t:'REVISTA'},{s:3,n:'Zotero + IA',t:'REFERENCIAS'},{s:3,n:'Scholarcy',t:'RESÚMENES'},
+];
+
+/* ── marco ───────────────────────────────────────────────── */
+const SX=118, SW=1684;
+function trackW(text,size,sp,weight=500){
+  ctx.save();
+  ctx.font = `${weight} ${size}px "Inter","Helvetica Neue",Arial,sans-serif`;
+  let w=-sp; for(const ch of text) w+=ctx.measureText(ch).width+sp;
+  ctx.restore(); return Math.max(w,0);
+}
+function bg(gt){
+  ctx.fillStyle=BG; ctx.fillRect(0,0,W,H);
+  let g=ctx.createRadialGradient(W*0.82+Math.sin(gt*0.12)*140, H*0.16+Math.cos(gt*0.1)*80, 0,
+                                 W*0.82, H*0.16, 900);
+  g.addColorStop(0,rgba(CY,.10)); g.addColorStop(1,rgba(CY,0));
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  g=ctx.createRadialGradient(W*0.12+Math.cos(gt*0.09)*120, H*0.88+Math.sin(gt*0.11)*70, 0,
+                             W*0.12, H*0.88, 820);
+  g.addColorStop(0,rgba(VI,.10)); g.addColorStop(1,rgba(VI,0));
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle=rgba(LINE,.06); ctx.lineWidth=1;
+  for(let x=80;x<W;x+=80){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for(let y=80;y<H;y+=80){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+}
+function header(eyebrow,title,t){
+  const a=eOut(seg(t,0,0.5)), b=eOut(seg(t,0.12,0.7)), u=eOut(seg(t,0.35,1.05));
+  if(eyebrow){ ctx.save(); ctx.globalAlpha=a;
+    const ew=trackW(eyebrow,17,3.4,600);
+    ctx.fillStyle=rgba(CY,.10); rr(SX,95,ew+56,42,21); ctx.fill();
+    ctx.strokeStyle=rgba(CY,.30); ctx.lineWidth=1; rr(SX,95,ew+56,42,21); ctx.stroke();
+    glowOn(CY,8); ctx.fillStyle=CY; ctx.beginPath(); ctx.arc(SX+20,116,4,0,7); ctx.fill(); glowOff();
+    tracked(eyebrow,SX+36,116,17,3.4,CY,600);
+    ctx.restore(); }
+  ctx.save(); ctx.globalAlpha=b; ctx.translate(0,(1-b)*10);
+  txt(title,SX,190,'600 58px "Inter","Helvetica Neue",Arial,sans-serif',INK,'left','alphabetic');
+  ctx.restore();
+  if(u>0){ ctx.save(); ctx.globalAlpha=u;
+    const g=ctx.createLinearGradient(SX,0,SX+130,0); g.addColorStop(0,CY); g.addColorStop(1,VI);
+    glowOn(CY,10); ctx.fillStyle=g; rr(SX,232,130*u,5,3); ctx.fill(); glowOff();
+    ctx.fillStyle=rgba(LINE,.22); ctx.fillRect(SX+150,234,(SW-150)*u,1.2);
+    ctx.restore(); }
+}
+let progA=0;
+function chrome(i,n){
+  progA += ((i+1)/n - progA)*0.08;
+  ctx.fillStyle=rgba(CY,.10); ctx.fillRect(0,0,W,4);
+  const g=ctx.createLinearGradient(0,0,Math.max(1,W*progA),0);
+  g.addColorStop(0,BL); g.addColorStop(1,CY);
+  glowOn(CY,8); ctx.fillStyle=g; ctx.fillRect(0,0,W*progA,4); glowOff();
+  const y=1026, gap=17, x0=W/2-(n-1)*gap/2;
+  for(let k=0;k<n;k++){
+    if(k===i){ glowOn(CY,8); ctx.fillStyle=CY; } else { ctx.fillStyle='#2A3646'; }
+    ctx.beginPath(); ctx.arc(x0+k*gap, y, k===i?4.6:3.2, 0, 7); ctx.fill(); glowOff();
+  }
+  tracked('TRABAJO CIENTÍFICO · IA', W-118, 1026, 14, 3.4, rgba(INK,.35), 500, 'right');
+  txt(String(i+1).padStart(2,'0')+' / '+String(n).padStart(2,'0'),
+      118, 1026, '500 15px ui-monospace,Menlo,monospace', rgba(INK,.35),'left','middle');
+}
+
+/* ── cuenta regresiva ────────────────────────────────────── */
+const TARGET=new Date('2026-07-28T19:00:00-05:00').getTime();
+function countdownStr(){
+  const diff=TARGET-Date.now();
+  if(diff<=0) return 'EN VIVO AHORA';
+  const d=Math.floor(diff/864e5),h=Math.floor(diff/36e5)%24,m=Math.floor(diff/6e4)%60;
+  return 'FALTAN '+String(d).padStart(2,'0')+'d '+String(h).padStart(2,'0')+'h '+String(m).padStart(2,'0')+'m';
+}
+
+/* ── chips ───────────────────────────────────────────────── */
+function drawChips(x,y,maxW,tags,color,t,delay){
+  let cx=x, cy=y; const gapX=12, gapY=14, h=46;
+  tags.forEach((label,i)=>{
+    ctx.font='500 22px "Inter",Arial,sans-serif';
+    const tw=ctx.measureText(label).width, w=tw+48;
+    if(cx+w>x+maxW){ cx=x; cy+=h+gapY; }
+    const k=eOut(seg(t,delay+i*0.1,delay+0.6+i*0.1));
+    if(k>0){ ctx.save(); ctx.globalAlpha=clamp(k); ctx.translate(0,(1-k)*10);
+      ctx.fillStyle=rgba(color,.07); rr(cx,cy,w,h,23); ctx.fill();
+      ctx.strokeStyle=rgba(color,.40); ctx.lineWidth=1.4; rr(cx,cy,w,h,23); ctx.stroke();
+      glowOn(color,6); dot(cx+22,cy+h/2,4,color,1); glowOff();
+      txt(label,cx+36,cy+h/2,'500 22px "Inter",Arial,sans-serif',INK,'left','middle');
+      ctx.restore();
+    }
+    cx+=w+gapX;
+  });
+  return cy + h;
+}
+function drawToolPills(x,y,maxW,list,color,t,delay){
+  let cx=x, cy=y; const gapX=10, gapY=12, h=42;
+  list.forEach((it,i)=>{
+    ctx.font='500 19px "Inter",Arial,sans-serif';
+    const tw=ctx.measureText(it.n).width, w=tw+42;
+    if(cx+w>x+maxW){ cx=x; cy+=h+gapY; }
+    const k=eOut(seg(t,delay+i*0.06,delay+0.5+i*0.06));
+    if(k>0){ ctx.save(); ctx.globalAlpha=clamp(k); ctx.translate(0,(1-k)*8);
+      ctx.fillStyle=rgba(color,.12); rr(cx,cy,w,h,21); ctx.fill();
+      glowOn(color,5); dot(cx+18,cy+h/2,3.5,color,1); glowOff();
+      txt(it.n,cx+30,cy+h/2,'500 19px "Inter",Arial,sans-serif',INK,'left','middle');
+      ctx.restore();
+    }
+    cx+=w+gapX;
+  });
+  return cy + h;
+}
+
+/* ── logos / iconos (vector) ─────────────────────────────── */
+function icClaude(cx,cy,s){
+  ctx.save(); ctx.translate(cx,cy); ctx.fillStyle='#D97757';
+  const rays=11, R=s*0.5, w=s*0.09;
+  for(let i=0;i<rays;i++){ ctx.save(); ctx.rotate(i/rays*Math.PI*2);
+    rr(-w/2,-R,w,R*0.86,w/2); ctx.fill(); ctx.restore(); }
+  ctx.restore();
+}
+function icPrompt(cx,cy,s){
+  ctx.save(); ctx.strokeStyle=CY; ctx.lineWidth=s*0.12; ctx.lineCap='round'; ctx.lineJoin='round';
+  const r=s*0.5;
+  ctx.beginPath(); ctx.moveTo(cx-r*0.55,cy-r*0.5); ctx.lineTo(cx-r*0.02,cy); ctx.lineTo(cx-r*0.55,cy+r*0.5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx+r*0.12,cy+r*0.5); ctx.lineTo(cx+r*0.62,cy+r*0.5); ctx.stroke();
+  ctx.restore();
+}
+function icDoc(cx,cy,s,color){
+  const c=color||INK, w=s*0.72,h=s*0.92,x=cx-w/2,y=cy-h/2,f=s*0.26;
+  ctx.save();
+  ctx.fillStyle=rgba(c,.16); ctx.strokeStyle=c; ctx.lineWidth=s*0.08; ctx.lineJoin='round';
+  ctx.beginPath();
+  ctx.moveTo(x,y); ctx.lineTo(x+w-f,y); ctx.lineTo(x+w,y+f); ctx.lineTo(x+w,y+h);
+  ctx.lineTo(x,y+h); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+w-f,y); ctx.lineTo(x+w-f,y+f); ctx.lineTo(x+w,y+f); ctx.stroke();
+  ctx.lineWidth=s*0.06; ctx.strokeStyle=rgba(c,.65);
+  for(let i=0;i<3;i++){ const ly=y+h*0.44+i*h*0.17; ctx.beginPath(); ctx.moveTo(x+w*0.2,ly); ctx.lineTo(x+w*0.8,ly); ctx.stroke(); }
+  ctx.restore();
+}
+function icSpark(cx,cy,R,fill){
+  ctx.fillStyle=fill; ctx.beginPath();
+  ctx.moveTo(cx,cy-R); ctx.quadraticCurveTo(cx,cy,cx+R,cy);
+  ctx.quadraticCurveTo(cx,cy,cx,cy+R); ctx.quadraticCurveTo(cx,cy,cx-R,cy);
+  ctx.quadraticCurveTo(cx,cy,cx,cy-R); ctx.fill();
+}
+function icNotebookLM(cx,cy,s){
+  const w=s*0.78,h=s*0.96,x=cx-w/2,y=cy-h/2;
+  ctx.save();
+  ctx.fillStyle=rgba('#1A73E8',.16); ctx.strokeStyle='#1A73E8'; ctx.lineWidth=s*0.08;
+  rr(x,y,w,h,s*0.12); ctx.fill(); rr(x,y,w,h,s*0.12); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+w*0.3,y+h*0.1); ctx.lineTo(x+w*0.3,y+h*0.9); ctx.stroke();
+  const g=ctx.createLinearGradient(cx,cy-s*0.2,cx+s*0.2,cy+s*0.2);
+  g.addColorStop(0,'#4E86F7'); g.addColorStop(1,'#9B72F2');
+  icSpark(cx+w*0.16,cy,s*0.2,g);
+  ctx.restore();
+}
+
+/* ── diagramas de flujo (iconos) ─────────────────────────── */
+function wfTile(cx,cy,it){
+  const box=it.box||60, c=it.c||CY, lp=it.lp||'below';
+  ctx.fillStyle=rgba(c,.10); rr(cx-box/2,cy-box/2,box,box,15); ctx.fill();
+  ctx.strokeStyle=rgba(c,.42); ctx.lineWidth=1.5; rr(cx-box/2,cy-box/2,box,box,15); ctx.stroke();
+  it.ic(cx,cy,box*0.56,it.icC);
+  const big=box>56, lf='600 '+(big?13.5:12.5)+'px "Inter",Arial,sans-serif', sf='400 '+(big?11.5:10.5)+'px "Inter",Arial,sans-serif';
+  if(lp==='below'){
+    txt(it.l, cx, cy+box/2+(big?18:16), lf, INK,'center','middle');
+    if(it.s) txt(it.s, cx, cy+box/2+(big?35:32), sf, MUT,'center','middle');
+  } else if(lp==='above'){
+    const off=it.s?(big?16:14):0;
+    txt(it.l, cx, cy-box/2-(big?18:16)-off, lf, INK,'center','middle');
+    if(it.s) txt(it.s, cx, cy-box/2-(big?16:14), sf, MUT,'center','middle');
+  } else {
+    const rightSide=lp!=='left', lx=cx+(rightSide?box/2+12:-box/2-12), al=rightSide?'left':'right';
+    if(it.s){ txt(it.l, lx, cy-9, lf, INK,al,'middle'); txt(it.s, lx, cy+11, sf, MUT,al,'middle'); }
+    else txt(it.l, lx, cy, lf, INK,al,'middle');
+  }
+}
+function drawLane(x,top,w,h,a){
+  ctx.save(); ctx.globalAlpha*=a;
+  ctx.fillStyle=rgba(CY,.035); rr(x,top,w,h,14); ctx.fill();
+  ctx.strokeStyle=rgba(CY,.14); ctx.lineWidth=1.2; rr(x,top,w,h,14); ctx.stroke();
+  glowOn(CY,6); ctx.fillStyle=CY; rr(x,top+16,4,h-32,2); ctx.fill(); glowOff();
+  ctx.restore();
+}
+function wfBadge(x,cy,sym,color){
+  ctx.fillStyle=BG; ctx.beginPath(); ctx.arc(x,cy,14,0,7); ctx.fill();
+  ctx.strokeStyle=rgba(color,.55); ctx.lineWidth=1.4; ctx.beginPath(); ctx.arc(x,cy,14,0,7); ctx.stroke();
+  txt(sym, x, cy+1, '600 19px "Inter",Arial,sans-serif', color,'center','middle');
+}
+function flowRow(left,right,cy,tiles,conns,t,t0){
+  const n=tiles.length, span=(n>1)?(right-left)/(n-1):0, box=60;
+  conns.forEach((sym,i)=>{
+    const k=eOut(seg(t,t0+0.12+(i+1)*0.22,t0+0.5+(i+1)*0.22)); if(k<=0)return;
+    const x1=left+span*i, x2=left+span*(i+1), midx=(x1+x2)/2, a=x1+box/2+8, b=x2-box/2-8;
+    ctx.save(); ctx.globalAlpha=k;
+    ctx.strokeStyle=rgba(CY,.5); ctx.lineWidth=2; ctx.lineCap='round'; glowOn(CY,5);
+    ctx.beginPath(); ctx.moveTo(a,cy); ctx.lineTo(lerp(a,b,k),cy); ctx.stroke(); glowOff();
+    if(k>=1) wfBadge(midx,cy,sym,CY);
+    ctx.restore();
+  });
+  tiles.forEach((it,i)=>{ const k=eBack(clamp(seg(t,t0+i*0.22,t0+0.5+i*0.22))); if(k<=0)return;
+    const cx=left+span*i; ctx.save(); ctx.globalAlpha=clamp(k);
+    const sc=lerp(0.86,1,clamp(k)); ctx.translate(cx,cy); ctx.scale(sc,sc); ctx.translate(-cx,-cy);
+    wfTile(cx,cy,it); ctx.restore(); });
+}
+function wfRowTag(x,cy,letter){
+  ctx.save();
+  ctx.fillStyle=rgba(CY,.14); rr(x,cy-16,34,32,10); ctx.fill();
+  ctx.strokeStyle=rgba(CY,.45); ctx.lineWidth=1.2; rr(x,cy-16,34,32,10); ctx.stroke();
+  txt(letter, x+17, cy, '700 16px ui-monospace,Menlo,monospace', CY,'center','middle');
+  ctx.restore();
+}
+function wf0(x,y,w,t,col){
+  const laneH=112, gap=20, left=x+82, right=x+w-26;
+  const yA=y, yB=y+laneH+gap, cyA=yA+46, cyB=yB+46;
+  drawLane(x,yA,w,laneH, eOut(seg(t,1.5,2.0)));
+  drawLane(x,yB,w,laneH, eOut(seg(t,1.85,2.35)));
+  wfRowTag(x+16,cyA,'A'); wfRowTag(x+16,cyB,'B');
+  flowRow(left,right,cyA,[
+    {ic:icClaude,l:'Claude Code',c:'#D97757'},
+    {ic:icPrompt,l:'Prompt',c:CY},
+    {ic:icDoc,l:'Documento',c:col,icC:col},
+  ],['+','='],t,1.7);
+  flowRow(left,right,cyB,[
+    {ic:icPrompt,l:'Prompt',c:CY},
+    {ic:icNotebookLM,l:'NotebookLM',s:'buscar información',c:'#1A73E8'},
+    {ic:icPrompt,l:'Prompt',c:CY},
+    {ic:icDoc,l:'Planteamiento',s:'del problema',c:col,icC:col},
+  ],['+','+','='],t,2.15);
+}
+
+/* ── iconos adicionales ──────────────────────────────────── */
+function icDB(cx,cy,s,color){
+  const c=color||CY, rx=s*0.4, ry=s*0.13, top=cy-s*0.4, bot=cy+s*0.32;
+  ctx.save(); ctx.lineWidth=s*0.08; ctx.strokeStyle=c; ctx.fillStyle=rgba(c,.16);
+  ctx.beginPath(); ctx.moveTo(cx-rx,top); ctx.lineTo(cx-rx,bot);
+  ctx.ellipse(cx,bot,rx,ry,0,Math.PI,0,true); ctx.lineTo(cx+rx,top); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(cx,top,rx,ry,0,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx-rx,top); ctx.lineTo(cx-rx,bot); ctx.moveTo(cx+rx,top); ctx.lineTo(cx+rx,bot);
+  ctx.ellipse(cx,bot,rx,ry,0,0,Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(cx,(top+bot)/2,rx,ry,0,0,Math.PI); ctx.stroke();
+  ctx.restore();
+}
+function icRStudio(cx,cy,s){
+  const R=s*0.46;
+  ctx.save(); ctx.fillStyle=rgba('#75AADB',.2); ctx.strokeStyle='#4E8CC7'; ctx.lineWidth=s*0.09;
+  ctx.beginPath(); ctx.ellipse(cx,cy,R,R*0.8,0,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  txt('R', cx, cy+1, '700 '+(s*0.66)+'px "Inter",Arial,sans-serif', '#4E8CC7','center','middle');
+  ctx.restore();
+}
+function icDataset(cx,cy,s,color){
+  const c=color||CY, w=s*0.82,h=s*0.72,x=cx-w/2,y=cy-h/2;
+  ctx.save(); ctx.strokeStyle=c; ctx.fillStyle=rgba(c,.16); ctx.lineWidth=s*0.08;
+  rr(x,y,w,h,s*0.1); ctx.fill(); rr(x,y,w,h,s*0.1); ctx.stroke();
+  ctx.lineWidth=s*0.05; ctx.strokeStyle=rgba(c,.6);
+  ctx.beginPath();
+  ctx.moveTo(x,y+h/3); ctx.lineTo(x+w,y+h/3); ctx.moveTo(x,y+2*h/3); ctx.lineTo(x+w,y+2*h/3);
+  ctx.moveTo(x+w/2,y); ctx.lineTo(x+w/2,y+h); ctx.stroke();
+  ctx.restore();
+}
+function icTree(cx,cy,s){
+  const c='#2FA36B';
+  ctx.save(); ctx.strokeStyle=c; ctx.lineWidth=s*0.09; ctx.lineCap='round'; ctx.fillStyle=c;
+  ctx.beginPath(); ctx.moveTo(cx,cy+s*0.45); ctx.lineTo(cx,cy-s*0.05); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx,cy+s*0.16); ctx.lineTo(cx-s*0.28,cy-s*0.04);
+  ctx.moveTo(cx,cy+s*0.05); ctx.lineTo(cx+s*0.28,cy-s*0.16); ctx.stroke();
+  dot(cx,cy-s*0.2,s*0.13,c,1); dot(cx-s*0.3,cy-s*0.1,s*0.1,c,1); dot(cx+s*0.3,cy-s*0.22,s*0.1,c,1);
+  ctx.restore();
+}
+function icBiblio(cx,cy,s){
+  const c=VI, pts=[[0,-0.3],[-0.32,0.04],[0.32,0.04],[-0.12,0.34],[0.2,0.3]];
+  ctx.save(); ctx.strokeStyle=rgba(c,.55); ctx.lineWidth=s*0.05;
+  const P=pts.map(p=>[cx+p[0]*s, cy+p[1]*s]);
+  [[0,1],[0,2],[1,3],[2,4],[3,4],[1,2]].forEach(e=>{ctx.beginPath();ctx.moveTo(P[e[0]][0],P[e[0]][1]);ctx.lineTo(P[e[1]][0],P[e[1]][1]);ctx.stroke();});
+  P.forEach(p=>dot(p[0],p[1],s*0.11,c,1));
+  ctx.restore();
+}
+function icFunnel(cx,cy,s){
+  const c=AM, w=s*0.8, top=cy-s*0.38;
+  ctx.save(); ctx.strokeStyle=c; ctx.fillStyle=rgba(c,.16); ctx.lineWidth=s*0.08; ctx.lineJoin='round';
+  ctx.beginPath();
+  ctx.moveTo(cx-w/2,top); ctx.lineTo(cx+w/2,top);
+  ctx.lineTo(cx+s*0.1,cy+s*0.04); ctx.lineTo(cx+s*0.1,cy+s*0.42);
+  ctx.lineTo(cx-s*0.1,cy+s*0.42); ctx.lineTo(cx-s*0.1,cy+s*0.04);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+
+/* ── flujo Etapa 02 (ramificación) ───────────────────────── */
+function wfArrow(x1,y1,x2,y2,k,color){
+  const ex=lerp(x1,x2,k), ey=lerp(y1,y2,k);
+  ctx.strokeStyle=rgba(color,.55); ctx.lineWidth=2; ctx.lineCap='round'; glowOn(color,4);
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(ex,ey); ctx.stroke(); glowOff();
+  if(k>=1){ const ang=Math.atan2(y2-y1,x2-x1), s=9;
+    ctx.beginPath();
+    ctx.moveTo(x2-s*Math.cos(ang-0.5), y2-s*Math.sin(ang-0.5));
+    ctx.lineTo(x2,y2);
+    ctx.lineTo(x2-s*Math.cos(ang+0.5), y2-s*Math.sin(ang+0.5)); ctx.stroke(); }
+}
+function linkNodes(a,b,k,color){
+  if(k<=0) return;
+  const dx=b.x-a.x, dy=b.y-a.y, len=Math.hypot(dx,dy)||1, ux=dx/len, uy=dy/len;
+  const oa=(a.box||54)/2+8, ob=(b.box||54)/2+11;
+  wfArrow(a.x+ux*oa, a.y+uy*oa, b.x-ux*ob, b.y-uy*ob, k, color);
+}
+function wfNode(t,t0,n,ic,l,s,c,lp){
+  const k=eBack(clamp(seg(t,t0,t0+0.5))); if(k<=0)return;
+  ctx.save(); ctx.globalAlpha=clamp(k);
+  const sc=lerp(0.86,1,clamp(k)); ctx.translate(n.x,n.y); ctx.scale(sc,sc); ctx.translate(-n.x,-n.y);
+  wfTile(n.x,n.y,{ic,l,s,c,box:n.box,icC:c,lp});
+  ctx.restore();
+}
+function pathReveal(pts, k, color, head){
+  if(k<=0) return;
+  const seglen=[]; let total=0;
+  for(let i=1;i<pts.length;i++){ const l=Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]); seglen.push(l); total+=l; }
+  const target=total*k;
+  ctx.save();
+  ctx.strokeStyle=rgba(color,.55); ctx.lineWidth=2; ctx.lineCap='round'; ctx.lineJoin='round'; glowOn(color,4);
+  ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
+  let acc=0, endpt=pts[0], ang=0;
+  for(let i=1;i<pts.length;i++){
+    const l=seglen[i-1];
+    ang=Math.atan2(pts[i][1]-pts[i-1][1],pts[i][0]-pts[i-1][0]);
+    if(acc+l<=target){ ctx.lineTo(pts[i][0],pts[i][1]); acc+=l; endpt=pts[i]; }
+    else { const f=(target-acc)/l, ex=lerp(pts[i-1][0],pts[i][0],f), ey=lerp(pts[i-1][1],pts[i][1],f);
+      ctx.lineTo(ex,ey); endpt=[ex,ey]; break; }
+  }
+  ctx.stroke(); glowOff();
+  if(head && k>=1){ const s=9;
+    ctx.beginPath();
+    ctx.moveTo(endpt[0]-s*Math.cos(ang-0.5), endpt[1]-s*Math.sin(ang-0.5));
+    ctx.lineTo(endpt[0],endpt[1]);
+    ctx.lineTo(endpt[0]-s*Math.cos(ang+0.5), endpt[1]-s*Math.sin(ang+0.5)); ctx.stroke(); }
+  ctx.restore();
+}
+function wfSearch(x,y,w,h,t,col){
+  const PX=u=>x+u*w, PY=v=>y+v*h;
+  const blue='#4E8CC7', orange='#E8833A', green='#2FA36B';
+  const nWOS={x:PX(0.28),y:PY(0.10),box:54};
+  const nSCO={x:PX(0.72),y:PY(0.10),box:54};
+  const nR  ={x:PX(0.50),y:PY(0.33),box:58};
+  const nCon={x:PX(0.50),y:PY(0.53),box:48};
+  const nToS={x:PX(0.16),y:PY(0.84),box:54};
+  const nBib={x:PX(0.50),y:PY(0.84),box:54};
+  const nPri={x:PX(0.84),y:PY(0.84),box:54};
+  const bot=n=>n.y+n.box/2, top=n=>n.y-n.box/2;
+  const busM=(bot(nWOS)+top(nR))/2, busS=(bot(nCon)+top(nToS))/2;
+  pathReveal([[nWOS.x,bot(nWOS)],[nWOS.x,busM],[nR.x,busM],[nR.x,top(nR)]], eOut(seg(t,0.9,1.5)), col, true);
+  pathReveal([[nSCO.x,bot(nSCO)],[nSCO.x,busM],[nR.x,busM],[nR.x,top(nR)]], eOut(seg(t,1.0,1.6)), col, true);
+  pathReveal([[nR.x,bot(nR)],[nCon.x,top(nCon)]], eOut(seg(t,1.6,2.0)), col, true);
+  pathReveal([[nCon.x,bot(nCon)],[nCon.x,busS],[nToS.x,busS],[nToS.x,top(nToS)]], eOut(seg(t,2.05,2.55)), col, true);
+  pathReveal([[nCon.x,bot(nCon)],[nCon.x,busS],[nBib.x,busS],[nBib.x,top(nBib)]], eOut(seg(t,2.25,2.75)), col, true);
+  pathReveal([[nCon.x,bot(nCon)],[nCon.x,busS],[nPri.x,busS],[nPri.x,top(nPri)]], eOut(seg(t,2.45,2.95)), col, true);
+  wfNode(t,0.30,nWOS, icDB,'Web of Science',null,blue,'above');
+  wfNode(t,0.45,nSCO, icDB,'Scopus',null,orange,'above');
+  wfNode(t,1.00,nR,   icRStudio,'RStudio','consolidar metadatos',blue,'right');
+  wfNode(t,1.55,nCon, icDataset,'Consolidado','metadatos',col,'right');
+  wfNode(t,2.15,nToS, icTree,'Tree of Science','búsqueda',green,'below');
+  wfNode(t,2.35,nBib, icBiblio,'Bibliometrix','visualización',VI,'below');
+  wfNode(t,2.55,nPri, icFunnel,'PRISMA','método',AM,'below');
+}
+
+/* ── iconos Etapas 03 y 04 ───────────────────────────────── */
+function icExcel(cx,cy,s){
+  const w=s*0.86,h=s*0.96,x=cx-w/2,y=cy-h/2, c='#21A366';
+  ctx.save();
+  ctx.fillStyle=rgba(c,.18); ctx.strokeStyle=c; ctx.lineWidth=s*0.08;
+  rr(x,y,w,h,s*0.12); ctx.fill(); rr(x,y,w,h,s*0.12); ctx.stroke();
+  ctx.strokeStyle=c; ctx.lineWidth=s*0.12; ctx.lineCap='round'; const r=s*0.2;
+  ctx.beginPath(); ctx.moveTo(cx-r,cy-r); ctx.lineTo(cx+r,cy+r); ctx.moveTo(cx+r,cy-r); ctx.lineTo(cx-r,cy+r); ctx.stroke();
+  ctx.restore();
+}
+function icColab(cx,cy,s){
+  const c='#E8710A', r=s*0.2;
+  ctx.save(); ctx.strokeStyle=c; ctx.lineWidth=s*0.15;
+  ctx.beginPath(); ctx.arc(cx-s*0.16,cy,r,0,Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx+s*0.16,cy,r,0,Math.PI*2); ctx.stroke();
+  ctx.restore();
+}
+function icResults(cx,cy,s,color){
+  const c=color||CY, w=s*0.92,h=s*0.86,x=cx-w/2,y=cy-h/2;
+  ctx.save(); ctx.strokeStyle=c; ctx.fillStyle=rgba(c,.14); ctx.lineWidth=s*0.07;
+  rr(x,y,w,h,s*0.1); ctx.fill(); rr(x,y,w,h,s*0.1); ctx.stroke();
+  ctx.fillStyle=c; const base=y+h*0.8, hs=[0.28,0.5,0.4];
+  for(let i=0;i<3;i++){ ctx.fillRect(x+w*0.13+i*w*0.19, base-h*hs[i], w*0.12, h*hs[i]); }
+  ctx.strokeStyle=rgba(c,.7); ctx.lineWidth=s*0.05;
+  for(let i=0;i<3;i++){ const ly=y+h*0.3+i*h*0.2; ctx.beginPath(); ctx.moveTo(x+w*0.62,ly); ctx.lineTo(x+w*0.86,ly); ctx.stroke(); }
+  ctx.restore();
+}
+function icSciSpace(cx,cy,s){
+  txt('S', cx, cy+s*0.02, '800 '+(s*1.02)+'px "Inter",Arial,sans-serif', '#0FA47F','center','middle');
+}
+function icOpenAI(cx,cy,s){
+  const c='#10A37F', r=s*0.19;
+  ctx.save(); ctx.strokeStyle=c; ctx.lineWidth=s*0.1; ctx.lineCap='round';
+  for(let i=0;i<6;i++){ const a=i/6*Math.PI*2 - Math.PI/2;
+    ctx.beginPath(); ctx.arc(cx+Math.cos(a)*s*0.24, cy+Math.sin(a)*s*0.24, r, 0, Math.PI*2); ctx.stroke(); }
+  ctx.restore();
+}
+function icJournalFinder(cx,cy,s){
+  const c='#E8710A', w=s*0.58,h=s*0.78,x=cx-s*0.42,y=cy-h/2;
+  ctx.save(); ctx.strokeStyle=rgba(c,.75); ctx.fillStyle=rgba(c,.14); ctx.lineWidth=s*0.07;
+  rr(x,y,w,h,s*0.08); ctx.fill(); rr(x,y,w,h,s*0.08); ctx.stroke();
+  ctx.strokeStyle=c; ctx.lineWidth=s*0.09; ctx.lineCap='round';
+  const mx=cx+s*0.16,my=cy+s*0.08,mr=s*0.2;
+  ctx.beginPath(); ctx.arc(mx,my,mr,0,Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mx+mr*0.7,my+mr*0.7); ctx.lineTo(mx+mr*1.5,my+mr*1.5); ctx.stroke();
+  ctx.restore();
+}
+function icTarget(cx,cy,s,color){
+  const c=color||VI;
+  ctx.save(); ctx.strokeStyle=c; ctx.lineWidth=s*0.08;
+  for(let r=s*0.48;r>s*0.13;r-=s*0.17){ ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke(); }
+  ctx.fillStyle=c; ctx.beginPath(); ctx.arc(cx,cy,s*0.1,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+/* ── flujo Etapa 03 (Analizar) ───────────────────────────── */
+function wfAnalizar(x,y,w,h,t,col){
+  const PX=u=>x+u*w, PY=v=>y+v*h;
+  const green='#21A366', orange='#E8710A', coral='#D97757';
+  const nX  ={x:PX(0.50),y:PY(0.09),box:56};
+  const nP  ={x:PX(0.50),y:PY(0.29),box:52};
+  const nCo ={x:PX(0.28),y:PY(0.55),box:56};
+  const nCl ={x:PX(0.72),y:PY(0.55),box:56};
+  const nOA ={x:PX(0.28),y:PY(0.85),box:56};
+  const nOB ={x:PX(0.72),y:PY(0.85),box:56};
+  const bot=n=>n.y+n.box/2, top=n=>n.y-n.box/2;
+  const busT=(bot(nP)+top(nCo))/2;
+  pathReveal([[nX.x,bot(nX)],[nP.x,top(nP)]], eOut(seg(t,0.9,1.3)), col, true);
+  pathReveal([[nP.x,bot(nP)],[nP.x,busT],[nCo.x,busT],[nCo.x,top(nCo)]], eOut(seg(t,1.4,1.9)), col, true);
+  pathReveal([[nP.x,bot(nP)],[nP.x,busT],[nCl.x,busT],[nCl.x,top(nCl)]], eOut(seg(t,1.55,2.05)), col, true);
+  pathReveal([[nCo.x,bot(nCo)],[nOA.x,top(nOA)]], eOut(seg(t,2.3,2.8)), '#E8710A', true);
+  pathReveal([[nCl.x,bot(nCl)],[nOB.x,top(nOB)]], eOut(seg(t,2.45,2.95)), '#D97757', true);
+  wfNode(t,0.30,nX,  icExcel,'Excel','datos',green,'right');
+  wfNode(t,0.90,nP,  icPrompt,'Prompt',null,CY,'right');
+  wfNode(t,1.65,nCo, icColab,'Colab + Gemini','básico',orange,'left');
+  wfNode(t,1.80,nCl, icClaude,'Claude Code','en código',coral,'right');
+  wfNode(t,2.65,nOA, icResults,'Tablas y figuras','ruta Colab',orange,'below');
+  wfNode(t,2.80,nOB, icResults,'Tablas y figuras','ruta Claude',coral,'below');
+}
+
+/* ── flujo Etapa 04 (Publicar) ───────────────────────────── */
+function wfPublicar(x,y,w,h,t,col){
+  const PX=u=>x+u*w, PY=v=>y+v*h;
+  const teal='#0FA47F', ogreen='#10A37F', orange='#E8710A';
+  const nSci={x:PX(0.30),y:PY(0.11),box:56};
+  const nAI ={x:PX(0.70),y:PY(0.11),box:56};
+  const nDoc={x:PX(0.50),y:PY(0.37),box:56};
+  const nJF ={x:PX(0.50),y:PY(0.61),box:58};
+  const nRev={x:PX(0.50),y:PY(0.85),box:58};
+  const bot=n=>n.y+n.box/2, top=n=>n.y-n.box/2;
+  const busM=(bot(nSci)+top(nDoc))/2;
+  pathReveal([[nSci.x,bot(nSci)],[nSci.x,busM],[nDoc.x,busM],[nDoc.x,top(nDoc)]], eOut(seg(t,0.9,1.5)), col, true);
+  pathReveal([[nAI.x,bot(nAI)],[nAI.x,busM],[nDoc.x,busM],[nDoc.x,top(nDoc)]], eOut(seg(t,1.0,1.6)), col, true);
+  pathReveal([[nDoc.x,bot(nDoc)],[nJF.x,top(nJF)]], eOut(seg(t,1.7,2.2)), col, true);
+  pathReveal([[nJF.x,bot(nJF)],[nRev.x,top(nRev)]], eOut(seg(t,2.3,2.8)), col, true);
+  wfNode(t,0.30,nSci, icSciSpace,'SciSpace',null,teal,'above');
+  wfNode(t,0.45,nAI,  icOpenAI,'Prism GPT',null,ogreen,'above');
+  wfNode(t,1.05,nDoc, icDoc,'Redacción','+ referencias',col,'right');
+  wfNode(t,1.90,nJF,  icJournalFinder,'Journal Finder','buscar revista',orange,'right');
+  wfNode(t,2.55,nRev, icTarget,'Revista objetivo','Q1',VI,'below');
+}
+
+/* ══ ESCENA 0 · portada ═══════════════════════════════════ */
+function s0(t){
+  const na = eOut(seg(t,0.15,1.6));
+  const pts = NET.map(p=>({ x:(((p.x+p.vx*t)%1)+1)%1*W, y:(((p.y+p.vy*t)%1)+1)%1*H }));
+  pts.forEach((a,i)=>{
+    for(let j=i+1;j<pts.length;j++){ const b=pts[j], d=Math.hypot(a.x-b.x,a.y-b.y);
+      if(d<230){ ctx.strokeStyle=rgba(i%2?CY:VI,(1-d/230)*.16*na); ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); } }
+    glowOn(i%3?CY:VI,6); ctx.fillStyle=rgba(i%3?CY:VI,.55*na);
+    ctx.beginPath(); ctx.arc(a.x,a.y,2.6,0,7); ctx.fill(); glowOff();
+  });
+
+  const a1=eOut(seg(t,0.3,0.9));
+  ctx.save(); ctx.globalAlpha=a1;
+  const ey='TALLER · TRABAJO CIENTÍFICO', ew=trackW(ey,16,3.6,600);
+  ctx.fillStyle=rgba(CY,.10); rr(W/2-ew/2-30,286,ew+60,42,21); ctx.fill();
+  ctx.strokeStyle=rgba(CY,.30); ctx.lineWidth=1; rr(W/2-ew/2-30,286,ew+60,42,21); ctx.stroke();
+  tracked(ey, W/2, 307, 16, 3.6, CY, 600, 'center');
+  ctx.restore();
+
+  const T1='INTELIGENCIA ARTIFICIAL', spc=6;
+  ctx.font='700 92px "Inter","Helvetica Neue",Arial,sans-serif';
+  ctx.textBaseline='middle'; ctx.textAlign='left';
+  let tot=-spc; const wid=[...T1].map(ch=>{ const w=ctx.measureText(ch).width; tot+=w+spc; return w; });
+  let cx=W/2-tot/2;
+  [...T1].forEach((ch,i)=>{
+    const k=eOut(seg(t,0.55+i*0.03,1.05+i*0.03));
+    if(k>0){ ctx.globalAlpha=k; glowOn(rgba(CY,.5),18*k); ctx.fillStyle=INK; ctx.fillText(ch,cx,428+(1-k)*24); glowOff(); }
+    cx+=wid[i]+spc;
+  });
+  ctx.globalAlpha=1; ctx.textBaseline='alphabetic';
+
+  const s2a=eOut(seg(t,1.1,1.8));
+  if(s2a>0){ ctx.globalAlpha=s2a;
+    txt('PARA LA INVESTIGACIÓN CIENTÍFICA', W/2, 520,
+        '600 50px "Inter","Helvetica Neue",Arial,sans-serif', rgba(INK,.88),'center','middle');
+    ctx.globalAlpha=1; }
+
+  const u=eOut(seg(t,1.6,2.3));
+  if(u>0){ const uw=580*u, g=ctx.createLinearGradient(W/2-uw/2,0,W/2+uw/2,0);
+    g.addColorStop(0,rgba(CY,0)); g.addColorStop(.5,CY); g.addColorStop(1,rgba(CY,0));
+    glowOn(CY,10); ctx.fillStyle=g; rr(W/2-uw/2,566,uw,4,2); ctx.fill(); glowOff(); }
+
+  const sa=eOut(seg(t,1.9,2.6));
+  if(sa>0){
+    const items=[['FORMULAR',C1],['BUSCAR',C2],['ANALIZAR',C3],['PUBLICAR',C4]];
+    const widths=items.map(it=>trackW(it[0],20,4,600));
+    const sepw=trackW('/',20,0,500), gp=24;
+    const total=widths.reduce((s,w)=>s+w,0)+(sepw+gp*2)*3;
+    let x0=W/2-total/2; ctx.globalAlpha=sa;
+    items.forEach((it,i)=>{ tracked(it[0],x0,616,20,4,it[1],600); x0+=widths[i]+gp;
+      if(i<3){ tracked('/',x0,616,20,0,rgba(INK,.3),400); x0+=sepw+gp; } });
+    ctx.globalAlpha=1;
+  }
+
+  const ca=eOut(seg(t,2.5,3.2));
+  if(ca>0){ ctx.globalAlpha=ca;
+    glowOn(CY,5);
+    tracked('28 JUL 2026 · 7:00 PM (UTC−5)', W/2, 724, 16, 3, CY, 600, 'center');
+    glowOff();
+    tracked('PhD. OSCAR IVÁN VARGAS PINEDA · CIENTÍFICO DE DATOS', W/2, 768, 13, 2.6, MUT, 500, 'center');
+    ctx.globalAlpha=1; }
+
+  const ha=seg(t,3.3,4.1);
+  if(ha>0){ ctx.globalAlpha=ha*(.5+.25*Math.sin(t*2.2));
+    tracked('ESPACIO  ·  →   PARA COMENZAR', W/2, 900, 15, 3.6, rgba(INK,.6), 500, 'center');
+    ctx.globalAlpha=1; }
+}
+
+/* ══ ESCENA 1 · pipeline ══════════════════════════════════ */
+function sFlow(t){
+  const ca=eOut(seg(t,0.2,0.9));
+  ctx.save(); ctx.globalAlpha=ca;
+  txt('Cuatro etapas del proceso de investigación.', 118, 268,
+      '400 26px "Inter",Arial,sans-serif', rgba(INK,.55),'left','alphabetic');
+  ctx.restore();
+
+  const y=560, R=62, cx=i=>118+421*(i+0.5);
+  for(let i=0;i<3;i++){ const k=eOut(seg(t,0.75+i*0.3,1.25+i*0.3)); if(k<=0) continue;
+    const x1=cx(i)+R+16, x2=cx(i+1)-R-16;
+    ctx.strokeStyle=rgba(CY,.4); ctx.lineWidth=2; ctx.lineCap='round'; glowOn(CY,8);
+    ctx.beginPath(); ctx.moveTo(x1,y); ctx.lineTo(lerp(x1,x2,k),y); ctx.stroke(); glowOff();
+    if(k>=1){ const ph=(t*0.7+i*0.3)%1; glowOn(CY,10);
+      dot(lerp(x1,x2,ph),y,4,CY,Math.sin(ph*Math.PI)); glowOff(); }
+  }
+  STAGES.forEach((S,i)=>{
+    const k=eBack(clamp(seg(t,0.4+i*0.3,1.0+i*0.3))); if(k<=0) return;
+    const x=cx(i); const kk=clamp(k); ctx.save(); ctx.globalAlpha=kk;
+    glowOn(S.color,20); ctx.fillStyle=rgba(S.color,.10);
+    ctx.beginPath(); ctx.arc(x,y,R*kk,0,7); ctx.fill(); glowOff();
+    ctx.strokeStyle=S.color; ctx.lineWidth=2.4; ctx.beginPath(); ctx.arc(x,y,R*kk,0,7); ctx.stroke();
+    txt(S.n, x, y-4, '600 42px ui-monospace,Menlo,monospace', S.color,'center','middle');
+    tracked(S.short.toUpperCase(), x, y+24, 12.5, 2, rgba(INK,.85), 600, 'center');
+    txt(S.name, x, y+R+36, '500 20px "Inter",Arial,sans-serif', rgba(INK,.6),'center','middle');
+    ctx.restore();
+  });
+  const la=eOut(seg(t,2.2,3.0));
+  if(la>0){ ctx.globalAlpha=la;
+    tracked('LA IA APOYA EN CADA ETAPA · LA DECISIÓN SIGUE SIENDO TUYA', W/2, 812, 13.5, 3, CY, 600, 'center');
+    ctx.globalAlpha=1; }
+}
+
+/* ══ ESCENAS 2–5 · etapas ═════════════════════════════════ */
+function stageBody(t,si){
+  const S=STAGES[si], col=S.color;
+  const px=980, py=286, pw=800, ph=628, pa=eOut(seg(t,0.15,0.8));
+  panel(px,py,pw,ph,pa);
+  ctx.save(); ctx.globalAlpha=pa*0.5;
+  txt(S.n, px+pw-36, py+34, '700 130px ui-monospace,Menlo,monospace', rgba(col,.13),'right','top');
+  ctx.restore();
+  ctx.save(); rr(px,py,pw,ph,18); ctx.clip();
+  if(si===1){ wfSearch(px+30, py+86, pw-60, ph-140, t, col); }
+  else if(si===2){ wfAnalizar(px+30, py+86, pw-60, ph-140, t, col); }
+  else if(si===3){ wfPublicar(px+30, py+86, pw-60, ph-140, t, col); }
+  else { const ix=px+70, iy=py+96, iw=pw-140, ih=ph-176; visStruct(ix,iy,iw,ih,t,col); }
+  ctx.restore();
+  ctx.save(); ctx.globalAlpha=pa;
+  tracked(S.vizLabel, px+40, py+42, 13, 2.6, col, 700);
+  ctx.restore();
+
+  const la=eOut(seg(t,0.2,0.8));
+  ctx.save(); ctx.globalAlpha=la;
+  tracked(S.leftLabel, 118, 300, 14, 3, col, 700);
+  ctx.restore();
+  const cbot = drawChips(118, 344, 760, S.tags, col, t, 0.4);
+
+  const hy = cbot + 50;
+  const ha2 = eOut(seg(t,0.9,1.5));
+  ctx.save(); ctx.globalAlpha=ha2;
+  glowOn(col,5); dot(124, hy-4, 4, col, 1); glowOff();
+  tracked('HERRAMIENTAS DE IA', 144, hy, 14, 3, col, 700);
+  ctx.restore();
+  const tbot = drawToolPills(118, hy+30, 810, TOOLS.filter(x=>x.s===si), col, t, 1.05);
+
+  const WF=[wf0,null,null,null][si];
+  if(WF){
+    const fy = tbot + 48;
+    const fa = eOut(seg(t,1.5,2.1));
+    ctx.save(); ctx.globalAlpha=fa;
+    glowOn(CY,5); dot(124, fy-4, 4, CY, 1); glowOff();
+    tracked('ALTERNATIVAS DE FLUJO DE TRABAJO', 144, fy, 14, 3, CY, 700);
+    ctx.restore();
+    WF(118, fy+26, 812, t, col);
+  }
+}
+
+function visStruct(x,y,w,h,t,col){
+  const cx=x+w*0.5, cy=y+h*0.5, R=Math.min(w,h)*0.38, N=7;
+  const nodes=[]; for(let i=0;i<N;i++){ const a=-Math.PI/2+i/N*Math.PI*2;
+    nodes.push({x:cx+Math.cos(a)*R, y:cy+Math.sin(a)*R, tp:0.6+i*0.13}); }
+  nodes.forEach((n,i)=>{ const k=eOut(clamp((t-n.tp)/0.5)); if(k<=0) return;
+    ctx.strokeStyle=rgba(col,.4); ctx.lineWidth=1.6; glowOn(col,8);
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(lerp(cx,n.x,k),lerp(cy,n.y,k)); ctx.stroke(); glowOff();
+    if(k>=1){ const ph=(t*0.6+i*0.2)%1; glowOn(col,10);
+      dot(lerp(cx,n.x,ph),lerp(cy,n.y,ph),3,col,Math.sin(ph*Math.PI)); glowOff(); }
+  });
+  const ra=eOut(seg(t,2.0,3.0));
+  if(ra>0){ ctx.strokeStyle=rgba(col,.18*ra); ctx.lineWidth=1.2; ctx.beginPath();
+    nodes.forEach((n,i)=>{ const m=nodes[(i+1)%N]; ctx.moveTo(n.x,n.y); ctx.lineTo(m.x,m.y); }); ctx.stroke(); }
+  nodes.forEach(n=>{ const k=eBack(clamp((t-n.tp)/0.4)); if(k<=0) return;
+    glowOn(col,12); dot(n.x,n.y,7*clamp(k),col,1); glowOff();
+    ctx.strokeStyle=rgba(col,.5); ctx.lineWidth=1.4; ctx.beginPath(); ctx.arc(n.x,n.y,12*clamp(k),0,7); ctx.stroke(); });
+  const ck=eBack(clamp(seg(t,0.2,0.8)));
+  if(ck>0){ glowOn(col,22); dot(cx,cy,12*clamp(ck),col,1); glowOff();
+    ctx.strokeStyle=col; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(cx,cy,20*clamp(ck),0,7); ctx.stroke(); }
+}
+
+function visSearch(x,y,w,h,t,col){
+  const X=v=>x+v*w, Y=v=>y+v*h;
+  SCLU.forEach((c,ci)=>{ const k=eOut(seg(t,0.6+ci*0.2,1.2+ci*0.2)); if(k<=0) return;
+    ctx.strokeStyle=rgba(col,.3); ctx.lineWidth=1.6; glowOn(col,6);
+    ctx.beginPath(); ctx.moveTo(X(QC.x),Y(QC.y)); ctx.lineTo(X(lerp(QC.x,c[0],k)),Y(lerp(QC.y,c[1],k))); ctx.stroke(); glowOff();
+    if(k>=1){ const ph=(t*0.6+ci*0.25)%1; glowOn(col,8);
+      dot(X(lerp(QC.x,c[0],ph)),Y(lerp(QC.y,c[1],ph)),3.5,col,Math.sin(ph*Math.PI)); glowOff(); }
+  });
+  for(let i=0;i<SEARCH.length;i++) for(let j=i+1;j<SEARCH.length;j++){
+    const a=SEARCH[i], b=SEARCH[j]; if(a.ci!==b.ci) continue;
+    if(Math.hypot(a.x-b.x,a.y-b.y)>0.14) continue;
+    const k=eOut(clamp((t-1.6-a.ci*0.2)/0.6)); if(k<=0) continue;
+    ctx.strokeStyle=rgba(col,.22); ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(X(a.x),Y(a.y)); ctx.lineTo(X(lerp(a.x,b.x,k)),Y(lerp(a.y,b.y,k))); ctx.stroke();
+  }
+  SEARCH.forEach(p=>{ const k=eBack(clamp((t-1.4-p.ci*0.2)/0.4)); if(k<=0) return;
+    glowOn(col,7); dot(X(p.x),Y(p.y),5.5*clamp(k),col,.9); glowOff(); });
+  const qk=eBack(clamp(seg(t,0.3,0.9)));
+  if(qk>0){ glowOn(col,18); dot(X(QC.x),Y(QC.y),9*clamp(qk),col,1); glowOff();
+    ctx.strokeStyle=col; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(X(QC.x),Y(QC.y),16*clamp(qk),0,7); ctx.stroke();
+    const s=(t*0.5)%1; ctx.globalAlpha=(1-s)*0.5; ctx.strokeStyle=col; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(X(QC.x),Y(QC.y),16+s*64,0,7); ctx.stroke(); ctx.globalAlpha=1; }
+}
+
+function visAnalizar(x,y,w,h,t,col){
+  const pw=w*0.6, X=v=>x+v*pw, Y=v=>y+h*0.9 - v*h*0.78;
+  ctx.strokeStyle=rgba(LINE,.25); ctx.lineWidth=1.4;
+  ctx.beginPath(); ctx.moveTo(x, y+h*0.9); ctx.lineTo(x+pw, y+h*0.9); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x, y+h*0.1); ctx.lineTo(x, y+h*0.9); ctx.stroke();
+  const p=eIO(seg(t,1.0,3.6));
+  const m=lerp(0.2,0.6,p), b=lerp(0.5,0.18,p);
+  const f=xx=>b+m*xx;
+  REG.forEach((d,i)=>{ const k=eBack(clamp(seg(t,0.4+i*0.014,0.85+i*0.014))); if(k<=0) return;
+    glowOn(col,6); dot(X(d.x),Y(d.y),6,col,0.85*clamp(k)); glowOff(); });
+  if(t>0.9){ glowOn(rgba(CY,.6),10); ctx.strokeStyle=INK; ctx.lineWidth=3.2; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(X(0.03),Y(f(0.03))); ctx.lineTo(X(0.97),Y(f(0.97))); ctx.stroke(); glowOff();
+    if(p>=1){ const ph=(t*0.4)%1; glowOn(col,10); dot(X(ph),Y(f(ph)),6,col,Math.sin(ph*Math.PI)*.9); glowOff(); } }
+  const bx=x+pw+56, bw=w-pw-64;
+  const cats=[0.9,0.62,0.44,0.3];
+  cats.forEach((cv,i)=>{ const k=eOut(seg(t,2.0+i*0.2,2.6+i*0.2)); if(k<=0) return;
+    const by=y+h*0.22+i*(h*0.17), bh=h*0.1;
+    ctx.fillStyle=rgba(col,.15); rr(bx,by,bw*0.92,bh,bh/2); ctx.fill();
+    glowOn(col,8); ctx.fillStyle=col; rr(bx,by,bw*0.92*cv*k,bh,bh/2); ctx.fill(); glowOff(); });
+}
+
+function visPublicar(x,y,w,h,t,col){
+  const dw=w*0.5, dx=x+6, dy=y+h*0.06, dh=h*0.88;
+  const pa=eOut(seg(t,0.3,1.0));
+  ctx.save(); ctx.globalAlpha=pa;
+  ctx.fillStyle='rgba(255,255,255,0.03)'; ctx.strokeStyle=rgba(col,.35); ctx.lineWidth=2;
+  rr(dx,dy,dw,dh,14); ctx.fill(); rr(dx,dy,dw,dh,14); ctx.stroke();
+  ctx.restore();
+  const secs=[['I','',0.9],['M','',0.7],['R','',0.95],['D','',0.6]];
+  secs.forEach((s,i)=>{ const k=eOut(seg(t,0.9+i*0.25,1.5+i*0.25)); if(k<=0) return;
+    const sy=dy+42+i*(dh-72)/4;
+    ctx.save(); ctx.globalAlpha=clamp(k);
+    tracked(s[0], dx+26, sy, 20, 1, col, 700);
+    for(let ln=0; ln<3; ln++){ const lw=(dw-110)*s[2]*(ln===2?0.6:1);
+      ctx.fillStyle=rgba(INK,.14); rr(dx+62, sy-6+ln*14, lw*k, 5, 2.5); ctx.fill(); }
+    ctx.restore();
+  });
+  const cx=x+w*0.78, cy=y+h*0.4, R=Math.min(w*0.18,h*0.3);
+  const ra=eOut(seg(t,2.2,3.0));
+  if(ra>0){ ctx.save(); ctx.globalAlpha=ra; glowOn(col,10);
+    for(let r=R;r>R*0.35;r-=R*0.3){ ctx.strokeStyle=rgba(col,.4); ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(cx,cy,r,0,7); ctx.stroke(); }
+    const ck=eOut(seg(t,2.8,3.4));
+    if(ck>0){ ctx.globalAlpha=ra*clamp(ck); ctx.strokeStyle=col; ctx.lineWidth=5; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(cx-R*0.3,cy+R*0.02); ctx.lineTo(cx-R*0.05,cy+R*0.26);
+      ctx.lineTo(cx+R*0.32,cy-R*0.24); ctx.stroke(); }
+    glowOff(); ctx.restore();
+    ctx.globalAlpha=ra;
+    tracked('REVISTA OBJETIVO', cx, cy+R+30, 12, 2, col, 700, 'center');
+    const qa=eOut(seg(t,3.2,3.8));
+    if(qa>0){ ctx.globalAlpha=qa; ctx.fillStyle=rgba(col,.14); rr(cx-38,cy+R+46,76,32,16); ctx.fill();
+      tracked('Q1', cx, cy+R+62, 15, 2, col, 700, 'center'); }
+    ctx.globalAlpha=1;
+  }
+}
+
+/* ══ ESCENAS 6–7 · herramientas ═══════════════════════════ */
+function toolsScene(t, sa, sb){
+  const cols=[sa,sb], px0=118, pw=800, gap=84, py=286, ph=628;
+  cols.forEach((si,ci)=>{
+    const px=px0+ci*(pw+gap);
+    const pa=eOut(seg(t,0.15+ci*0.15,0.8+ci*0.15)); if(pa<=0) return;
+    panel(px,py,pw,ph,pa);
+    const S=STAGES[si], col=S.color;
+    const list=TOOLS.filter(x=>x.s===si);
+    ctx.save(); ctx.globalAlpha=pa;
+    glowOn(col,6); dot(px+40,py+50,5,col,1); glowOff();
+    tracked('ETAPA '+S.n+' · '+S.short.toUpperCase(), px+58, py+50, 16, 2.6, col, 700);
+    txt(list.length+' herramientas', px+pw-44, py+50, '500 16px ui-monospace,Menlo,monospace', MUT, 'right','middle');
+    ctx.strokeStyle=rgba(col,.22); ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.moveTo(px+40,py+78); ctx.lineTo(px+pw-40,py+78); ctx.stroke();
+    ctx.restore();
+    const top=py+100, avail=ph-100-22, rh=Math.min(62, avail/list.length), big=rh>52;
+    list.forEach((it,i)=>{
+      const k=eOut(seg(t, 0.5+ci*0.15+i*0.05, 1.0+ci*0.15+i*0.05)); if(k<=0) return;
+      const ry=top+i*rh+rh/2;
+      ctx.save(); ctx.globalAlpha=clamp(k); ctx.translate((1-k)*26,0);
+      glowOn(col,5); dot(px+52, ry, 4, col, 1); glowOff();
+      txt(it.n, px+74, ry, '600 '+(big?23:21)+'px "Inter",Arial,sans-serif', INK,'left','middle');
+      ctx.font='600 12px ui-monospace,Menlo,monospace';
+      const tw=ctx.measureText(it.t).width, pillW=tw+22, pillX=px+pw-44-pillW;
+      ctx.fillStyle=rgba(col,.10); rr(pillX,ry-14,pillW,28,14); ctx.fill();
+      ctx.strokeStyle=rgba(col,.28); ctx.lineWidth=1; rr(pillX,ry-14,pillW,28,14); ctx.stroke();
+      tracked(it.t, pillX+11, ry, 12, 1.5, col, 600);
+      ctx.restore();
+    });
+  });
+}
+
+/* ══ ESCENA 8 · cierre ════════════════════════════════════ */
+function sCierre(t){
+  const rows=[
+    ['01','La autoría y la responsabilidad son tuyas.', CY],
+    ['02','Declara el uso de IA en tu revista.', VI],
+  ];
+  const rw=1180, rh=150, gap=34, x=W/2-rw/2, y0=316;
+  rows.forEach((r,i)=>{
+    const k=eOut(seg(t,0.3+i*0.4,1.0+i*0.4)); if(k<=0) return;
+    const y=y0+i*(rh+gap);
+    ctx.save(); ctx.globalAlpha=k; ctx.translate(0,(1-k)*22);
+    panel(x,y,rw,rh,1);
+    glowOn(r[2],10); ctx.fillStyle=r[2]; rr(x,y+24,7,rh-48,4); ctx.fill(); glowOff();
+    txt(r[0], x+56, y+rh/2, '600 46px ui-monospace,Menlo,monospace', rgba(r[2],.4),'left','middle');
+    txt(r[1], x+160, y+rh/2, '500 34px "Inter",Arial,sans-serif', INK,'left','middle');
+    ctx.restore();
+  });
+  const ea=eOut(seg(t,1.6,2.4));
+  if(ea>0){ ctx.globalAlpha=ea;
+    const y=y0+2*(rh+gap)+30;
+    glowOn(CY,5);
+    tracked('28 JUL 2026 · 7:00 PM (UTC−5)', W/2, y, 15, 3, CY, 600,'center');
+    glowOff();
+    tracked('PhD. OSCAR IVÁN VARGAS PINEDA · CIENTÍFICO DE DATOS', W/2, y+40, 13, 2.6, MUT, 500,'center');
+    ctx.globalAlpha=1; }
+  const qa=eOut(seg(t,2.4,3.2));
+  if(qa>0){ ctx.globalAlpha=qa*(.7+.3*Math.sin(t*2));
+    txt('¿Preguntas?', W/2, y0+2*(rh+gap)+150, '600 52px "Inter",Arial,sans-serif', INK,'center','middle');
+    ctx.globalAlpha=1; }
+}
+
+/* ── mazo ────────────────────────────────────────────────── */
+const DECK = [
+  { full:true, draw:s0 },
+  { eyebrow:'',                    title:'El proceso de investigación',      draw:sFlow },
+  { eyebrow:'ETAPA 01 · FORMULAR', title:'Formulación del proyecto',         draw:t=>stageBody(t,0) },
+  { eyebrow:'ETAPA 02 · BUSCAR',   title:'Búsqueda especializada',           draw:t=>stageBody(t,1) },
+  { eyebrow:'ETAPA 03 · ANALIZAR', title:'Análisis de datos',                draw:t=>stageBody(t,2) },
+  { eyebrow:'ETAPA 04 · PUBLICAR', title:'Redacción y publicación',          draw:t=>stageBody(t,3) },
+  { eyebrow:'CIERRE',              title:'La IA acelera, tú respondes',       draw:sCierre },
+];
+
+let idx = 0, t0 = performance.now(), trans = null;
+const TRD = 0.55;
+
+function drawSlide(i,t){
+  const S = DECK[i];
+  if(!S.full) header(S.eyebrow, S.title, t);
+  ctx.save(); S.draw(t); ctx.restore();
+}
+function paint(target,i,t){
+  const saved = ctx; ctx = target;
+  ctx.clearRect(0,0,W,H);
+  drawSlide(i,t);
+  ctx = saved;
+}
+function render(now){
+  const t = (now - t0)/1000, gt = now/1000;
+  bg(gt);
+  if(trans){
+    const k = eIO(clamp((now - trans.start)/(TRD*1000)));
+    paint(octx, trans.from, trans.ft);
+    ctx.save(); ctx.globalAlpha=1-k; ctx.translate(0,-46*k); ctx.drawImage(oc,0,0); ctx.restore();
+    paint(octx, idx, t);
+    ctx.save(); ctx.globalAlpha=k; ctx.translate(0,34*(1-k)); ctx.drawImage(oc,0,0); ctx.restore();
+    if(k>=1) trans=null;
+  } else {
+    drawSlide(idx, t);
+  }
+  chrome(idx, DECK.length);
+  requestAnimationFrame(render);
+}
+function go(n){
+  const next = clamp(n, 0, DECK.length-1);
+  if(next !== idx){
+    trans = { from: idx, ft: (performance.now()-t0)/1000, start: performance.now() };
+    idx = next; t0 = performance.now();
+  } else if(n === idx){ trans = null; t0 = performance.now(); }
+}
+const help = document.getElementById('help');
+const toggleHelp = () => help.classList.toggle('on');
+document.getElementById('next').onclick = e => { e.stopPropagation(); go(idx+1); };
+document.getElementById('prev').onclick = e => { e.stopPropagation(); go(idx-1); };
+document.getElementById('replay').onclick = e => { e.stopPropagation(); go(idx); };
+document.getElementById('fs').onclick = e => { e.stopPropagation();
+  document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); };
+document.getElementById('hbtn').onclick = e => { e.stopPropagation(); toggleHelp(); };
+help.addEventListener('click', () => help.classList.remove('on'));
+cv.addEventListener('click', () => go(idx+1));
+addEventListener('keydown', e => {
+  if(e.key==='h'||e.key==='H'||e.key==='?'){ toggleHelp(); return; }
+  if(e.key==='Escape'){ help.classList.remove('on'); return; }
+  if(['ArrowRight','Space','PageDown','Enter'].includes(e.code)){ e.preventDefault(); go(idx+1); }
+  if(['ArrowLeft','PageUp','Backspace'].includes(e.code)){ e.preventDefault(); go(idx-1); }
+  if(e.code==='Home') go(0);
+  if(e.code==='End')  go(DECK.length-1);
+  if(e.key==='r'||e.key==='R') go(idx);
+  if(e.key==='f'||e.key==='F')
+    document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+  if(/^[0-9]$/.test(e.key)) go(e.key==='0' ? DECK.length-1 : parseInt(e.key)-1);
+});
+let idleT;
+const nav = document.getElementById('nav');
+addEventListener('mousemove', () => {
+  nav.classList.remove('idle'); document.body.classList.remove('hidecursor');
+  clearTimeout(idleT);
+  idleT = setTimeout(() => { nav.classList.add('idle'); document.body.classList.add('hidecursor'); }, 2600);
+});
+requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>
